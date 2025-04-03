@@ -33,42 +33,48 @@ def process_image(image_path, notion_api_key=None, notion_database_id=None):
     selected_word = extract_keyword(text)
     print("選出的單字:", selected_word)
     
+    # 檢查是否找到有效的關鍵字
+    if selected_word == "No suitable keywords found":
+        print("❌ 無法從圖片中提取有效的關鍵字，跳過此圖片")
+        return
+    
     # 3. 獲取單字詳細信息
     word_info = get_word_info(selected_word)
-    if word_info:
-        # 4. 翻譯單字和定義
-        word_info.chinese_definition = translate_to_chinese(word_info.definition)
-        word_info.chinese_word = translate_to_chinese(word_info.word)
+    if not word_info:
+        print(f"❌ 無法獲取單字 '{selected_word}' 的詳細信息，跳過此圖片")
+        return
         
-        # 5. 顯示結果
-        print("\n單字信息:")
-        print(word_info)
+    # 4. 翻譯單字和定義
+    word_info.chinese_definition = translate_to_chinese(word_info.definition)
+    word_info.chinese_word = translate_to_chinese(word_info.word)
+    
+    # 5. 顯示結果
+    print("\n單字信息:")
+    print(word_info)
+    
+    # 6. 上傳圖片到 Imgur
+    imgur = ImgurUploader()
+    imgur_link = imgur.upload_image(image_path)
+    if imgur_link:
+        print(f"\n圖片已上傳到 Imgur: {imgur_link}")
         
-        # 6. 上傳圖片到 Imgur
-        imgur = ImgurUploader()
-        imgur_link = imgur.upload_image(image_path)
-        if imgur_link:
-            print(f"\n圖片已上傳到 Imgur: {imgur_link}")
-            
-            # 7. 上傳到 Notion
-            try:
-                notion_uploader = NotionUploader(notion_api_key, notion_database_id)
-                notion_uploader.upload_word_info(
-                    selected_word,
-                    word_info,
-                    imgur_link
-                )
-            except Exception as e:
-                print(f"❌ Notion 上傳失敗: {str(e)}")
-                print("請檢查：")
-                print("1. Notion API 密鑰是否正確")
-                print("2. 數據庫 ID 是否正確")
-                print("3. 數據庫是否已與集成共享")
-                print("4. 網絡連接是否正常")
-        else:
-            print("❌ Imgur 上傳失敗，無法繼續 Notion 上傳")
+        # 7. 上傳到 Notion
+        try:
+            notion_uploader = NotionUploader(notion_api_key, notion_database_id)
+            notion_uploader.upload_word_info(
+                selected_word,
+                word_info,
+                imgur_link
+            )
+        except Exception as e:
+            print(f"❌ Notion 上傳失敗: {str(e)}")
+            print("請檢查：")
+            print("1. Notion API 密鑰是否正確")
+            print("2. 數據庫 ID 是否正確")
+            print("3. 數據庫是否已與集成共享")
+            print("4. 網絡連接是否正常")
     else:
-        print(f"無法獲取單字 '{selected_word}' 的信息")
+        print("❌ Imgur 上傳失敗，無法繼續 Notion 上傳")
 
 def process_directory(directory_path, notion_api_key, notion_database_id):
     """
