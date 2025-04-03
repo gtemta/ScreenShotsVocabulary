@@ -1,0 +1,31 @@
+# 環境變量和敏感信息
+.env
+imgur_credentials.json
+token.json
+credentials.json
+processed_words.json
+
+# Python 編譯文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*$py.class
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 項目特定
+*.jpg
+*.jpeg
+*.png
+*.gif
+temp_image.jpg
+temp_* 
+__pycache__/notion_utils.cpython-311.pyc
+
