@@ -1,142 +1,163 @@
+import asyncio
+import logging
+from processors.word_processor import WordProcessor, is_valid_english_sentence
+from uploaders.imgur_uploader import ImgurUploader
+from uploaders.notion_uploader import NotionUploader
 from ocr_utils import extract_text
-from word_processor import extract_keyword, get_word_info
-from translator import translate_to_chinese
-from imgur_uploader import ImgurUploader
-from notion_utils import NotionUploader
 import os
 from dotenv import load_dotenv
 import argparse
 import glob
+import json
+from models.deepseek_processor import DeepSeekProcessor
+from models.gemma_processor import GemmaProcessor
+from models.phi3_processor import Phi3Processor
+from reviewers.chatgpt_reviewer import ChatGPTReviewer
+from utils.word_utils import load_learned_words, save_learned_words
 
-def process_image(image_path, notion_api_key=None, notion_database_id=None):
-    """
-    處理圖片並獲取單字信息
-    
-    Args:
-        image_path (str): 圖片文件路徑
-        notion_api_key (str, optional): Notion API 密鑰
-        notion_database_id (str, optional): Notion 數據庫 ID
-    """
-    # 檢查 Notion 配置
-    if not notion_api_key or not notion_database_id:
-        print("⚠️ 警告: Notion API 密鑰或數據庫 ID 未設置")
-        print("請檢查 .env 文件是否包含以下配置：")
-        print("NOTION_TOKEN=你的 Notion API 密鑰")
-        print("NOTION_DATABASE_ID=你的數據庫 ID")
-        return
+# 載入環境變量
+load_dotenv()
 
-    # 1. 從圖片中提取文字
-    text = extract_text(image_path)
-    print("提取的文字:", text)
-    
-    # 2. 提取關鍵詞
-    selected_word = extract_keyword(text)
-    print("選出的單字:", selected_word)
-    
-    # 檢查是否找到有效的關鍵字
-    if selected_word == "No suitable keywords found":
-        print("❌ 無法從圖片中提取有效的關鍵字，跳過此圖片")
-        return
-    
-    # 3. 獲取單字詳細信息
-    word_info = get_word_info(selected_word)
-    if not word_info:
-        print(f"❌ 無法獲取單字 '{selected_word}' 的詳細信息，跳過此圖片")
-        return
+# 設置日誌
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+async def process_image(image_path, notion_api_key=None, notion_database_id=None):
+    """處理單個圖片"""
+    try:
+        # 1. 從圖片中提取文字
+        text = extract_text(image_path)
+        print("提取的文字:", text)
         
-    # 4. 翻譯單字和定義
-    word_info.chinese_definition = translate_to_chinese(word_info.definition)
-    word_info.chinese_word = translate_to_chinese(word_info.word)
-    
-    # 5. 顯示結果
-    print("\n單字信息:")
-    print(word_info)
-    
-    # 6. 上傳圖片到 Imgur
-    imgur = ImgurUploader()
-    imgur_link = imgur.upload_image(image_path)
-    if imgur_link:
-        print(f"\n圖片已上傳到 Imgur: {imgur_link}")
+        # 2. 初步篩選文字
+        print("\n進行初步文字篩選...")
+        if not is_valid_english_sentence(text):
+            print("❌ 提取的文字不是有效的英文句子，跳過此圖片")
+            return
+            
+        print("✅ 文字通過初步篩選")
         
-        # 7. 上傳到 Notion
-        try:
-            notion_uploader = NotionUploader(notion_api_key, notion_database_id)
-            notion_uploader.upload_word_info(
-                selected_word,
-                word_info,
-                imgur_link
-            )
-        except Exception as e:
-            print(f"❌ Notion 上傳失敗: {str(e)}")
-            print("請檢查：")
-            print("1. Notion API 密鑰是否正確")
-            print("2. 數據庫 ID 是否正確")
-            print("3. 數據庫是否已與集成共享")
-            print("4. 網絡連接是否正常")
-    else:
-        print("❌ Imgur 上傳失敗，無法繼續 Notion 上傳")
+        # 3. 使用本地 AI 模型處理文本
+        processors = {
+            "DeepSeek": DeepSeekProcessor(),
+            "Gemma": GemmaProcessor(),
+            "Phi-3": Phi3Processor()
+        }
+        
+        # 讀取已學習的單字
+        learned_words = load_learned_words()
+        print(f"已載入 {len(learned_words)} 個已學習的單字")
+        
+        # 使用多個模型處理文本
+        results = {}
+        for name, processor in processors.items():
+            print(f"\n使用 {name} 處理文本...")
+            result = processor.process_text(text)
+            results[name] = result
+        
+        # 使用 ChatGPT 審核結果
+        reviewer = ChatGPTReviewer()
+        final_result = reviewer.review_vocabulary(results, learned_words)
+        
+        if not final_result["vocabulary"]:
+            print("❌ 無法從圖片中提取有效的關鍵字，跳過此圖片")
+            return
+            
+        # 4. 上傳圖片到 Imgur（只上傳一次）
+        imgur = ImgurUploader()
+        image_url = await imgur.upload(image_path)
+        if not image_url:
+            print("❌ 圖片上傳到 Imgur 失敗")
+            return
+            
+        print(f"\n圖片已上傳到 Imgur: {image_url}")
+        
+        # 5. 為每個詞彙創建 Notion 頁面
+        notion = NotionUploader(notion_api_key, notion_database_id)
+        success_count = 0
+        total_words = len(final_result["vocabulary"])
+        new_words = []  # 用於收集成功上傳的新單字
+        
+        print(f"\n開始上傳 {total_words} 個詞彙到 Notion...")
+        
+        for i, (vocab, chinese_word, definition, chinese_def, examples, synonyms, antonyms) in enumerate(
+            zip(
+                final_result["vocabulary"],
+                final_result["chinese_words"],
+                final_result["definitions"],
+                final_result["chinese_definitions"],
+                final_result["examples"],
+                final_result["synonyms"],
+                final_result["antonyms"]
+            ),
+            1
+        ):
+            try:
+                # 創建詞彙資訊字典
+                word_info = {
+                    "word": vocab,
+                    "chinese_word": chinese_word,
+                    "definition": definition,
+                    "chinese_definition": chinese_def,
+                    "examples": examples,
+                    "synonyms": synonyms,
+                    "antonyms": antonyms
+                }
+                
+                # 上傳到 Notion
+                notion.upload_word_info(vocab, word_info, image_url)
+                success_count += 1
+                new_words.append(vocab)  # 添加到新單字列表
+                print(f"✅ 成功上傳詞彙 {i}/{total_words}: {vocab}")
+            except Exception as e:
+                print(f"❌ 上傳詞彙 {vocab} 失敗: {str(e)}")
+        
+        print(f"\n上傳完成：成功 {success_count}/{total_words} 個詞彙")
+        
+        # 6. 保存新學習的單字
+        if new_words:
+            save_learned_words(new_words)
+            
+    except Exception as e:
+        print(f"❌ 處理圖片時發生錯誤: {str(e)}")
 
-def process_directory(directory_path, notion_api_key, notion_database_id):
-    """
-    處理目錄中的所有圖片文件
-    
-    Args:
-        directory_path (str): 目錄路徑
-        notion_api_key (str): Notion API 密鑰
-        notion_database_id (str): Notion 數據庫 ID
-    """
-    # 支持的圖片格式
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif']
-    image_files = []
-    
-    # 收集所有圖片文件
-    for ext in image_extensions:
-        image_files.extend(glob.glob(os.path.join(directory_path, ext)))
-    
-    if not image_files:
-        print(f"⚠️ 在目錄 {directory_path} 中沒有找到支持的圖片文件")
-        return
-    
-    print(f"找到 {len(image_files)} 個圖片文件")
-    
-    # 處理每個圖片文件
-    for image_path in image_files:
-        print(f"\n處理圖片: {os.path.basename(image_path)}")
-        process_image(image_path, notion_api_key, notion_database_id)
-
-def main():
-    # 創建命令行參數解析器
-    parser = argparse.ArgumentParser(description='從圖片中提取單字並上傳到 Notion')
-    parser.add_argument('path', help='圖片文件路徑或包含圖片的目錄路徑')
-    args = parser.parse_args()
-    
-    # 加載 .env 文件
-    load_dotenv()
-    
-    # 從 .env 文件獲取 Notion 配置
-    notion_api_key = os.getenv("NOTION_TOKEN")
-    notion_database_id = os.getenv("NOTION_DATABASE_ID")
-    
-    if not notion_api_key or not notion_database_id:
-        print("❌ 錯誤: 未找到 Notion 配置")
-        print("請確保 .env 文件存在並包含以下配置：")
-        print("NOTION_TOKEN=你的 Notion API 密鑰")
-        print("NOTION_DATABASE_ID=你的數據庫 ID")
-        exit(1)
-    
-    # 檢查路徑是否存在
-    if not os.path.exists(args.path):
-        print(f"❌ 錯誤: 路徑 '{args.path}' 不存在")
-        exit(1)
-    
-    # 根據路徑類型進行處理
-    if os.path.isdir(args.path):
-        process_directory(args.path, notion_api_key, notion_database_id)
-    elif os.path.isfile(args.path):
-        process_image(args.path, notion_api_key, notion_database_id)
-    else:
-        print(f"❌ 錯誤: '{args.path}' 既不是文件也不是目錄")
-        exit(1)
+async def main():
+    try:
+        # 創建命令行參數解析器
+        parser = argparse.ArgumentParser(description='處理圖片並上傳到 Notion')
+        parser.add_argument('--path', type=str, help='圖片路徑或目錄路徑')
+        args = parser.parse_args()
+        
+        # 獲取 Notion API 密鑰和資料庫 ID
+        notion_api_key = os.getenv('NOTION_TOKEN')
+        notion_database_id = os.getenv('NOTION_DATABASE_ID')
+        
+        if not notion_api_key or not notion_database_id:
+            print("❌ 請提供 Notion Token 和資料庫 ID")
+            return
+        
+        # 處理圖片
+        if args.path:
+            if os.path.isfile(args.path):
+                # 處理單個圖片
+                await process_image(args.path, notion_api_key, notion_database_id)
+            elif os.path.isdir(args.path):
+                # 處理目錄中的所有圖片
+                image_files = glob.glob(os.path.join(args.path, '*.jpg')) + \
+                            glob.glob(os.path.join(args.path, '*.png'))
+                for image_path in image_files:
+                    await process_image(image_path, notion_api_key, notion_database_id)
+            else:
+                print(f"❌ 無效的路徑: {args.path}")
+        else:
+            print("❌ 請提供圖片路徑或目錄路徑")
+            
+    except Exception as e:
+        logger.error(f"處理過程發生錯誤: {str(e)}")
+        raise
 
 if __name__ == "__main__":
-    main() 
+    asyncio.run(main()) 

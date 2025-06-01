@@ -2,7 +2,7 @@ import requests
 import json
 import os
 from notion_client import Client
-from imgur_uploader import ImgurUploader
+from uploaders.imgur_uploader import ImgurUploader
 import time
 
 class NotionUploader:
@@ -26,11 +26,11 @@ class NotionUploader:
         
         Args:
             word (str): 單字
-            word_info (WordInfo): 單字信息對象
+            word_info (dict): 單字信息字典
             image_url (str, optional): 圖片 URL
         """
         # 創建標題（英文單字 : 中文意思）
-        title = f"{word} : {word_info.chinese_word}"
+        title = f"{word} : {word_info['chinese_word']}"
         
         # 創建 Notion 頁面
         notion_data = {
@@ -87,7 +87,7 @@ class NotionUploader:
         
         Args:
             page_id (str): Notion 頁面 ID
-            word_info (WordInfo): 單字信息對象
+            word_info (dict): 單字信息字典
             image_url (str, optional): 圖片 URL
         """
         max_retries = 3
@@ -105,7 +105,7 @@ class NotionUploader:
                             "rich_text": [{
                                 "type": "text",
                                 "text": {
-                                    "content": f"**{word_info.word} ({word_info.chinese_word})**"
+                                    "content": f"**{word_info['word']} ({word_info['chinese_word']})**"
                                 }
                             }]
                         }
@@ -151,7 +151,7 @@ class NotionUploader:
                             "rich_text": [{
                                 "type": "text",
                                 "text": {
-                                    "content": word_info.definition
+                                    "content": word_info['definition']
                                 }
                             }]
                         }
@@ -176,7 +176,7 @@ class NotionUploader:
                             "rich_text": [{
                                 "type": "text",
                                 "text": {
-                                    "content": word_info.chinese_definition
+                                    "content": word_info['chinese_definition']
                                 }
                             }]
                         }
@@ -193,20 +193,27 @@ class NotionUploader:
                                 }
                             }]
                         }
-                    },
-                    {
+                    }
+                ])
+
+                # 添加所有例句
+                for example in word_info['examples']:
+                    children.append({
                         "object": "block",
                         "type": "bulleted_list_item",
                         "bulleted_list_item": {
                             "rich_text": [{
                                 "type": "text",
                                 "text": {
-                                    "content": word_info.examples[0] if word_info.examples else "No examples available"
+                                    "content": example
                                 }
                             }]
                         }
-                    },
-                    # 近義詞塊
+                    })
+
+                # 添加同義詞和反義詞
+                children.extend([
+                    # 同義詞塊
                     {
                         "object": "block",
                         "type": "heading_2",
@@ -226,7 +233,7 @@ class NotionUploader:
                             "rich_text": [{
                                 "type": "text",
                                 "text": {
-                                    "content": ", ".join(word_info.synonyms) if word_info.synonyms else "無"
+                                    "content": ", ".join(word_info['synonyms']) if word_info['synonyms'] else "無"
                                 }
                             }]
                         }
@@ -251,7 +258,7 @@ class NotionUploader:
                             "rich_text": [{
                                 "type": "text",
                                 "text": {
-                                    "content": ", ".join(word_info.antonyms) if word_info.antonyms else "無"
+                                    "content": ", ".join(word_info['antonyms']) if word_info['antonyms'] else "無"
                                 }
                             }]
                         }
