@@ -8,7 +8,6 @@ import os
 from dotenv import load_dotenv
 import argparse
 import glob
-import json
 from models.deepseek_processor import DeepSeekProcessor
 from models.gemma_processor import GemmaProcessor
 from models.phi3_processor import Phi3Processor
@@ -25,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-async def process_image(image_path, notion_api_key=None, notion_database_id=None):
+async def process_image(image_path):
     """處理單個圖片"""
     try:
         # 1. 從圖片中提取文字
@@ -33,12 +32,12 @@ async def process_image(image_path, notion_api_key=None, notion_database_id=None
         print("提取的文字:", text)
         
         # 2. 初步篩選文字
-        print("\n進行初步文字篩選...")
-        if not is_valid_english_sentence(text):
-            print("❌ 提取的文字不是有效的英文句子，跳過此圖片")
-            return
+        # print("\n進行初步文字篩選...")
+        # if not is_valid_english_sentence(text):
+        #     print("❌ 提取的文字不是有效的英文句子，跳過此圖片")
+        #     return
             
-        print("✅ 文字通過初步篩選")
+        # print("✅ 文字通過初步篩選")
         
         # 3. 使用本地 AI 模型處理文本
         processors = {
@@ -68,7 +67,7 @@ async def process_image(image_path, notion_api_key=None, notion_database_id=None
             
         # 4. 上傳圖片到 Imgur（只上傳一次）
         imgur = ImgurUploader()
-        image_url = await imgur.upload(image_path)
+        image_url = imgur.upload_image(image_path)
         if not image_url:
             print("❌ 圖片上傳到 Imgur 失敗")
             return
@@ -76,7 +75,7 @@ async def process_image(image_path, notion_api_key=None, notion_database_id=None
         print(f"\n圖片已上傳到 Imgur: {image_url}")
         
         # 5. 為每個詞彙創建 Notion 頁面
-        notion = NotionUploader(notion_api_key, notion_database_id)
+        notion = NotionUploader()
         success_count = 0
         total_words = len(final_result["vocabulary"])
         new_words = []  # 用於收集成功上傳的新單字
@@ -96,19 +95,17 @@ async def process_image(image_path, notion_api_key=None, notion_database_id=None
             1
         ):
             try:
-                # 創建詞彙資訊字典
-                word_info = {
-                    "word": vocab,
-                    "chinese_word": chinese_word,
-                    "definition": definition,
-                    "chinese_definition": chinese_def,
-                    "examples": examples,
-                    "synonyms": synonyms,
-                    "antonyms": antonyms
-                }
-                
                 # 上傳到 Notion
-                notion.upload_word_info(vocab, word_info, image_url)
+                await notion.upload(
+                    word=vocab,
+                    image_url=image_url,
+                    chinese_word=chinese_word,
+                    definition=definition,
+                    chinese_definition=chinese_def,
+                    examples=examples,
+                    synonyms=synonyms,
+                    antonyms=antonyms
+                )
                 success_count += 1
                 new_words.append(vocab)  # 添加到新單字列表
                 print(f"✅ 成功上傳詞彙 {i}/{total_words}: {vocab}")
@@ -131,25 +128,17 @@ async def main():
         parser.add_argument('--path', type=str, help='圖片路徑或目錄路徑')
         args = parser.parse_args()
         
-        # 獲取 Notion API 密鑰和資料庫 ID
-        notion_api_key = os.getenv('NOTION_TOKEN')
-        notion_database_id = os.getenv('NOTION_DATABASE_ID')
-        
-        if not notion_api_key or not notion_database_id:
-            print("❌ 請提供 Notion Token 和資料庫 ID")
-            return
-        
         # 處理圖片
         if args.path:
             if os.path.isfile(args.path):
                 # 處理單個圖片
-                await process_image(args.path, notion_api_key, notion_database_id)
+                await process_image(args.path)
             elif os.path.isdir(args.path):
                 # 處理目錄中的所有圖片
                 image_files = glob.glob(os.path.join(args.path, '*.jpg')) + \
                             glob.glob(os.path.join(args.path, '*.png'))
                 for image_path in image_files:
-                    await process_image(image_path, notion_api_key, notion_database_id)
+                    await process_image(image_path)
             else:
                 print(f"❌ 無效的路徑: {args.path}")
         else:

@@ -9,6 +9,7 @@ class ChatGPTReviewer:
     
     def __init__(self):
         self.api_key = os.getenv('OPENAI_API_KEY')
+        self.client = openai.OpenAI(api_key=self.api_key)
         self.model = "gpt-3.5-turbo"
         
     def review_vocabulary(self, vocab_lists: Dict[str, Dict[str, List[str]]], learned_words: List[str] = None) -> Dict[str, List[str]]:
@@ -31,16 +32,30 @@ class ChatGPTReviewer:
             prompt = self._prepare_prompt(vocab_lists, learned_words)
             
             # 調用 ChatGPT API
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "你是一個專業的英文詞彙審核專家，請整合並審核來自不同模型的詞彙列表。"},
                     {"role": "user", "content": prompt}
                 ]
             )
             
             # 解析回應
             result = json.loads(response.choices[0].message.content)
+            print("\n=== ChatGPT 審核結果 ===")
+            for phrase in result["phrases"]:
+                print(f"\n詞彙: {phrase['word']}")
+                print(f"來源模型: {phrase.get('source_model', '未知')}")
+                print(f"中文翻譯: {phrase['chinese_word']}")
+                print(f"英文定義: {phrase['definition']}")
+                print(f"中文定義: {phrase['chinese_definition']}")
+                print("\n例句:")
+                for example in phrase['examples']:
+                    print(f"- {example}")
+                if phrase['synonyms']:
+                    print(f"\n同義詞: {', '.join(phrase['synonyms'])}")
+                if phrase['antonyms']:
+                    print(f"\n反義詞: {', '.join(phrase['antonyms'])}")
+                print("-" * 30)
             
             # 轉換為標準格式
             return {

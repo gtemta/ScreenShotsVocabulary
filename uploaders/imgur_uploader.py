@@ -5,6 +5,10 @@ import base64
 import time
 from PIL import Image
 import io
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import certifi
 
 class ImgurUploader:
     def __init__(self):
@@ -14,6 +18,32 @@ class ImgurUploader:
         self.max_retries = 3
         self.retry_delay = 5  # 重试延迟秒数
         self.max_image_size = 5 * 1024 * 1024  # 最大图片大小（5MB）
+        
+        # 配置请求会话
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["POST", "GET", "HEAD"],
+            respect_retry_after_header=True
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=10,
+            pool_maxsize=10
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        
+        # 使用 certifi 提供的证书
+        self.session.verify = certifi.where()
+        
+        # 设置连接超时
+        self.session.timeout = (5, 30)  # (连接超时, 读取超时)
+        
+        # 禁用 SSL 警告
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
     def load_imgur_credentials(self):
         """加載 Imgur API 憑證"""
@@ -87,29 +117,23 @@ class ImgurUploader:
             if not compressed_image:
                 return None
                 
-            # 轉換為 base64
-            encoded_image = base64.b64encode(compressed_image).decode('utf-8')
-            
             # 準備上傳數據
             headers = {
-                'Authorization': f'Client-ID {self.imgur_client_id}',
-                'Content-Type': 'application/json'
+                'Authorization': f'Client-ID {self.imgur_client_id}'
             }
             
-            data = {
-                'image': encoded_image,
-                'type': 'base64',
-                'name': filename
+            # 使用文件上传
+            files = {
+                'image': (filename, compressed_image, 'image/jpeg')
             }
             
             # 重試機制
             for attempt in range(self.max_retries):
                 try:
-                    response = requests.post(
+                    response = self.session.post(
                         'https://api.imgur.com/3/image',
                         headers=headers,
-                        json=data,
-                        timeout=30  # 設置超時時間
+                        files=files
                     )
                     
                     if response.status_code == 200:
@@ -124,6 +148,13 @@ class ImgurUploader:
                     else:
                         print(f"❌ Imgur 上傳失敗 (狀態碼: {response.status_code}): {response.text}")
                         
+                except requests.exceptions.SSLError as e:
+                    print(f"⚠️ SSL 錯誤: {str(e)}")
+                    if attempt < self.max_retries - 1:
+                        wait_time = (attempt + 1) * self.retry_delay
+                        print(f"⚠️ 等待 {wait_time} 秒後重試...")
+                        time.sleep(wait_time)
+                        continue
                 except requests.exceptions.RequestException as e:
                     if attempt < self.max_retries - 1:
                         wait_time = (attempt + 1) * self.retry_delay

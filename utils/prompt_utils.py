@@ -10,7 +10,7 @@ def build_prompt(text: str) -> str:
     """
     return f"""You are an expert English language instructor helping intermediate to advanced learners.
 
-Please extract useful English words or phrases from the following text. For each word/phrase, provide:
+Please extract at most 3 useful English words or phrases from the following text. For each word/phrase, provide:
 1. The word/phrase itself
 2. Chinese translation
 3. English definition

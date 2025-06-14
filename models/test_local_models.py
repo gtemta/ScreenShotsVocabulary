@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import sys
 import os
 import json
@@ -29,7 +30,7 @@ def test_model(processor, text: str, model_name: str) -> None:
         
         # 檢查結果是否為空
         if not result or not result.get("phrases"):
-            print("❌ 沒有提取到任何詞彙")
+            print("[ERROR] 沒有提取到任何詞彙")
             return
             
         # 檢查所有必要的欄位是否存在
@@ -41,7 +42,7 @@ def test_model(processor, text: str, model_name: str) -> None:
             # 檢查必要欄位
             missing_fields = [field for field in required_fields if field not in phrase]
             if missing_fields:
-                print(f"❌ 詞彙 {i} 缺少必要的欄位: {', '.join(missing_fields)}")
+                print(f"[ERROR] 詞彙 {i} 缺少必要的欄位: {', '.join(missing_fields)}")
                 continue
                 
             print(f"\n詞彙 {i}:")
@@ -59,7 +60,7 @@ def test_model(processor, text: str, model_name: str) -> None:
             print("-" * 30)
             
     except json.JSONDecodeError as e:
-        print(f"❌ JSON 解析錯誤: {str(e)}")
+        print(f"[ERROR] JSON 解析錯誤: {str(e)}")
         print("請檢查模型返回的 JSON 格式是否正確")
         print("預期的格式：")
         print("""
@@ -78,7 +79,7 @@ def test_model(processor, text: str, model_name: str) -> None:
 }
         """)
     except Exception as e:
-        print(f"❌ 測試失敗: {str(e)}")
+        print(f"[ERROR] 測試失敗: {str(e)}")
         print("錯誤類型:", type(e).__name__)
 
 def main():

@@ -92,11 +92,7 @@ def is_valid_english_word(word):
     # 过滤掉包含版本号格式的文本（如 V0.92350）
     if re.match(r'^[vV]\d+\.?\d*', word):
         return False
-        
-    # 过滤掉包含数字的文本
-    if re.search(r'\d', word):
-        return False
-        
+
     # 过滤掉包含特殊字符的文本
     if re.search(r'[^a-zA-Z]', word):
         return False
@@ -107,10 +103,6 @@ def is_valid_english_word(word):
         
     # 过滤掉全大写的单词（通常是缩写）
     if word.isupper():
-        return False
-        
-    # 过滤掉包含连续相同字母的单词（如 "hellooo"）
-    if re.search(r'(.)\1{2,}', word):
         return False
         
     return True
