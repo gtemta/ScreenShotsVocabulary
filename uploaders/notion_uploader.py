@@ -39,156 +39,79 @@ class NotionUploader:
             bool: 是否上傳成功
         """
         try:
-            # 創建新頁面
-            new_page = {
-                "parent": {"database_id": get_id(self.database_id)},
-                "properties": {
-                    "Word": {
-                        "title": [
-                            {
-                                "text": {
-                                    "content": word
-                                }
-                            }
-                        ]
-                    },
-                    "Chinese": {
-                        "rich_text": [
-                            {
-                                "text": {
-                                    "content": chinese_word
-                                }
-                            }
-                        ]
-                    },
-                    "Definition": {
-                        "rich_text": [
-                            {
-                                "text": {
-                                    "content": definition
-                                }
-                            }
-                        ]
-                    },
-                    "Chinese Definition": {
-                        "rich_text": [
-                            {
-                                "text": {
-                                    "content": chinese_definition
-                                }
-                            }
-                        ]
-                    }
-                },
-                "children": [
-                    {
-                        "object": "block",
-                        "type": "image",
-                        "image": {
-                            "type": "external",
-                            "external": {
-                                "url": image_url
-                            }
-                        }
-                    },
-                    {
-                        "object": "block",
-                        "type": "heading_2",
-                        "heading_2": {
-                            "rich_text": [
-                                {
-                                    "text": {
-                                        "content": "Examples"
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
+            # Validate input data
+            self._validate_upload_data(
+                word=word, 
+                image_url=image_url,
+                chinese_word=chinese_word,
+                definition=definition,
+                chinese_definition=chinese_definition
+            )
             
-            # 添加例句
-            for example in examples:
-                new_page["children"].append({
-                    "object": "block",
-                    "type": "bulleted_list_item",
-                    "bulleted_list_item": {
-                        "rich_text": [
-                            {
-                                "text": {
-                                    "content": example
-                                }
-                            }
-                        ]
-                    }
-                })
+            # Set defaults for optional parameters
+            examples = examples or []
+            synonyms = synonyms or []
+            antonyms = antonyms or []
             
-            # 添加同義詞
-            if synonyms:
-                new_page["children"].extend([
-                    {
-                        "object": "block",
-                        "type": "heading_2",
-                        "heading_2": {
-                            "rich_text": [
-                                {
-                                    "text": {
-                                        "content": "Synonyms"
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    {
-                        "object": "block",
-                        "type": "bulleted_list_item",
-                        "bulleted_list_item": {
-                            "rich_text": [
-                                {
-                                    "text": {
-                                        "content": ", ".join(synonyms)
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ])
+            # Create page structure
+            page_data = self._create_page_structure(
+                word=word,
+                chinese_word=chinese_word,
+                definition=definition,
+                chinese_definition=chinese_definition
+            )
             
-            # 添加反義詞
-            if antonyms:
-                new_page["children"].extend([
-                    {
-                        "object": "block",
-                        "type": "heading_2",
-                        "heading_2": {
-                            "rich_text": [
-                                {
-                                    "text": {
-                                        "content": "Antonyms"
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    {
-                        "object": "block",
-                        "type": "bulleted_list_item",
-                        "bulleted_list_item": {
-                            "rich_text": [
-                                {
-                                    "text": {
-                                        "content": ", ".join(antonyms)
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ])
+            # Add content blocks
+            self._add_image_block(page_data, image_url)
+            self._add_examples_section(page_data, examples)
+            self._add_word_lists(page_data, synonyms, antonyms)
             
-            # 創建頁面
-            self.client.pages.create(**new_page)
-            return True
+            # Create page with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    result = self.client.pages.create(**page_data)
+                    page_id = result.get('id')
+                    self.logger.info(f"Successfully uploaded vocabulary '{word}' to Notion (page: {page_id})")
+                    return True
+                    
+                except RequestTimeoutError:
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Notion request timeout, retrying ({attempt + 1}/{max_retries})")
+                        continue
+                    else:
+                        raise NotionUploadError("Upload failed due to repeated timeouts")
+                        
+                except APIError as e:
+                    if e.code == 'invalid_request_url':
+                        raise NotionConfigurationError(f"Invalid database ID: {self.database_id}")
+                    elif e.code == 'unauthorized':
+                        raise NotionConfigurationError("Invalid API key or insufficient permissions")
+                    elif e.code == 'validation_error':
+                        raise NotionUploadError(f"Data validation failed: {e.message}")
+                    else:
+                        raise NotionUploadError(f"Notion API error: {e.message}")
+                        
+            return False
             
+        except (NotionUploadError, NotionConfigurationError):
+            raise
         except Exception as e:
-            print(f"Notion 上傳錯誤: {str(e)}")
-            return False 
+            self.logger.error(f"Unexpected error during Notion upload: {e}")
+            raise NotionUploadError(f"Unexpected upload error: {e}")
+    
+    def test_connection(self) -> bool:
+        """Test Notion connection and database access
+        
+        Returns:
+            True if connection is successful
+            
+        Raises:
+            NotionConfigurationError: If connection fails
+        """
+        try:
+            self._validate_database_access()
+            return True
+        except Exception as e:
+            self.logger.error(f"Notion connection test failed: {e}")
+            raise NotionConfigurationError(f"Connection test failed: {e}") 

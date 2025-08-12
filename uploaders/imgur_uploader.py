@@ -1,28 +1,59 @@
-import os.path
+import os
 import json
-import requests
-import base64
+import logging
 import time
-from PIL import Image
+from pathlib import Path
+from typing import Optional
 import io
 import urllib3
+import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import certifi
 
+# Optional PIL import for image processing
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    Image = None
+
+class ImgurUploaderError(Exception):
+    """Base exception for Imgur uploader errors"""
+    pass
+
+class ImgurConfigurationError(ImgurUploaderError):
+    """Configuration related errors"""
+    pass
+
+class ImgurUploadError(ImgurUploaderError):
+    """Upload operation errors"""
+    pass
+
 class ImgurUploader:
-    def __init__(self):
-        """初始化 Imgur 上傳器"""
-        self.imgur_client_id = None
-        self.load_imgur_credentials()
-        self.max_retries = 3
-        self.retry_delay = 5  # 重试延迟秒数
-        self.max_image_size = 5 * 1024 * 1024  # 最大图片大小（5MB）
+    def __init__(self, client_id: Optional[str] = None, config_path: Optional[str] = None):
+        """Initialize Imgur uploader with dependency injection support"""
+        self.logger = logging.getLogger(__name__)
+        self.imgur_client_id = client_id or os.getenv('IMGUR_CLIENT_ID')
+        self.config_path = config_path or 'imgur_credentials.json'
+        self.max_retries = int(os.getenv('IMGUR_MAX_RETRIES', '3'))
+        self.retry_delay = int(os.getenv('IMGUR_RETRY_DELAY', '5'))
+        self.max_image_size = int(os.getenv('IMGUR_MAX_SIZE', str(5 * 1024 * 1024)))
         
-        # 配置请求会话
+        if not self.imgur_client_id:
+            self._load_imgur_credentials()
+        
+        if not self.imgur_client_id:
+            raise ImgurConfigurationError("Imgur client ID not found in environment or config file")
+        
+        self._setup_session()
+        
+    def _setup_session(self) -> None:
+        """Configure requests session with security best practices"""
         self.session = requests.Session()
         retry_strategy = Retry(
-            total=3,
+            total=self.max_retries,
             backoff_factor=0.5,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST", "GET", "HEAD"],
@@ -36,98 +67,127 @@ class ImgurUploader:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         
-        # 使用 certifi 提供的证书
+        # Use secure certificate verification
         self.session.verify = certifi.where()
+        self.session.timeout = (5, 30)
         
-        # 设置连接超时
-        self.session.timeout = (5, 30)  # (连接超时, 读取超时)
-        
-        # 禁用 SSL 警告
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
-    def load_imgur_credentials(self):
-        """加載 Imgur API 憑證"""
+        # Disable SSL warnings only in development
+        if os.getenv('ENVIRONMENT') != 'production':
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    def _load_imgur_credentials(self) -> None:
+        """Load Imgur API credentials from file"""
+        config_file = Path(self.config_path)
+        if not config_file.exists():
+            self.logger.warning(f"Config file {self.config_path} not found")
+            return
+            
         try:
-            with open('imgur_credentials.json', 'r') as f:
+            with config_file.open('r') as f:
                 credentials = json.load(f)
                 self.imgur_client_id = credentials.get('client_id')
-        except Exception as e:
-            print(f"⚠️ 無法加載 Imgur 憑證: {str(e)}")
-            print("請確保 imgur_credentials.json 文件存在並包含有效的 client_id")
+        except (json.JSONDecodeError, IOError) as e:
+            self.logger.error(f"Failed to load Imgur credentials: {e}")
+            raise ImgurConfigurationError(f"Invalid config file: {e}")
             
-    def compress_image(self, image_path):
-        """
-        壓縮圖片到合適的大小
+    def _validate_image_path(self, image_path: str) -> Path:
+        """Validate and sanitize image path"""
+        path = Path(image_path)
         
-        Args:
-            image_path (str): 圖片路徑
+        if not path.exists():
+            raise ImgurUploadError(f"Image file not found: {image_path}")
             
-        Returns:
-            bytes: 壓縮後的圖片數據
-        """
+        if not path.is_file():
+            raise ImgurUploadError(f"Path is not a file: {image_path}")
+            
+        # Security check: ensure file is in allowed location
         try:
-            # 打開圖片
+            path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise ImgurUploadError(f"Invalid file path: {image_path}")
+            
+        # Check file size
+        if path.stat().st_size > self.max_image_size * 2:  # Allow 2x for pre-compression
+            raise ImgurUploadError(f"Image file too large: {path.stat().st_size} bytes")
+            
+        return path
+    
+    def _compress_image(self, image_path: Path) -> bytes:
+        """Compress image to suitable size with security validation"""
+        if not PIL_AVAILABLE:
+            raise ImgurUploadError("PIL (Pillow) is required for image processing but not installed")
+            
+        try:
             with Image.open(image_path) as img:
-                # 轉換為 RGB 模式（如果是 RGBA）
+                # Security: Validate image format
+                if img.format not in ('JPEG', 'PNG', 'GIF', 'WEBP'):
+                    raise ImgurUploadError(f"Unsupported image format: {img.format}")
+                
+                # Convert RGBA to RGB for JPEG compatibility
                 if img.mode in ('RGBA', 'LA'):
                     background = Image.new('RGB', img.size, (255, 255, 255))
-                    background.paste(img, mask=img.split()[-1])
+                    if img.mode == 'RGBA':
+                        background.paste(img, mask=img.split()[-1])
+                    else:
+                        background.paste(img)
                     img = background
                 
-                # 計算壓縮比例
+                # Progressive compression
                 quality = 95
                 output = io.BytesIO()
                 
-                while True:
+                while quality >= 30:
                     output.seek(0)
                     output.truncate()
-                    img.save(output, format='JPEG', quality=quality)
-                    if len(output.getvalue()) <= self.max_image_size or quality <= 30:
+                    img.save(output, format='JPEG', quality=quality, optimize=True)
+                    
+                    if len(output.getvalue()) <= self.max_image_size:
                         break
                     quality -= 5
                 
-                return output.getvalue()
+                compressed_data = output.getvalue()
+                if len(compressed_data) > self.max_image_size:
+                    raise ImgurUploadError(f"Cannot compress image below size limit: {len(compressed_data)} bytes")
+                    
+                return compressed_data
                 
+        except ImgurUploadError:
+            raise
         except Exception as e:
-            print(f"⚠️ 圖片壓縮失敗: {str(e)}")
-            return None
+            self.logger.error(f"Image compression failed: {e}")
+            raise ImgurUploadError(f"Image compression failed: {e}")
             
-    def upload_to_imgur(self, image_path):
-        """
-        將圖片上傳到 Imgur
-        
-        Args:
-            image_path (str): 要上傳的圖片路徑
-            
-        Returns:
-            str: 上傳後圖片的直接連結
-        """
-        if not self.imgur_client_id:
-            print("❌ 未找到 Imgur API 憑證")
-            return None
-            
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename for upload security"""
+        # Remove directory traversal attempts
+        filename = os.path.basename(filename)
+        # Keep only alphanumeric, dots, underscores, and hyphens
+        filename = ''.join(c for c in filename if c.isalnum() or c in '._-')
+        # Limit length
+        filename = filename[:255]
+        # Ensure we have a valid filename
+        if not filename:
+            filename = 'image.jpg'
+        return filename
+    
+    def _upload_to_imgur(self, image_path: Path) -> str:
+        """Upload image to Imgur with proper error handling"""
         try:
-            # 處理文件名，確保符合 Imgur 要求
-            filename = os.path.basename(image_path)
-            filename = ''.join(c for c in filename if c.isalnum() or c in '_.')
-            filename = filename[:255]
+            # Validate and compress image
+            compressed_image = self._compress_image(image_path)
+            filename = self._sanitize_filename(image_path.name)
             
-            # 壓縮圖片
-            compressed_image = self.compress_image(image_path)
-            if not compressed_image:
-                return None
-                
-            # 準備上傳數據
+            # Prepare upload data
             headers = {
-                'Authorization': f'Client-ID {self.imgur_client_id}'
+                'Authorization': f'Client-ID {self.imgur_client_id}',
+                'User-Agent': 'ScreenShotsVocabulary/1.0'
             }
             
-            # 使用文件上传
             files = {
                 'image': (filename, compressed_image, 'image/jpeg')
             }
             
-            # 重試機制
+            # Retry mechanism with exponential backoff
             for attempt in range(self.max_retries):
                 try:
                     response = self.session.post(
@@ -138,99 +198,135 @@ class ImgurUploader:
                     
                     if response.status_code == 200:
                         result = response.json()
-                        return result['data']['link']
-                    elif response.status_code == 429:  # 速率限制
+                        image_url = result['data']['link']
+                        self.logger.info(f"Successfully uploaded image: {image_url}")
+                        return image_url
+                        
+                    elif response.status_code == 429:  # Rate limiting
                         if attempt < self.max_retries - 1:
-                            wait_time = (attempt + 1) * self.retry_delay
-                            print(f"⚠️ 達到速率限制，等待 {wait_time} 秒後重試...")
+                            wait_time = (2 ** attempt) * self.retry_delay
+                            self.logger.warning(f"Rate limited, waiting {wait_time}s before retry {attempt + 1}/{self.max_retries}")
                             time.sleep(wait_time)
                             continue
+                        else:
+                            raise ImgurUploadError("Rate limit exceeded after all retries")
+                            
+                    elif response.status_code == 400:
+                        error_msg = "Invalid image or request parameters"
+                        try:
+                            error_data = response.json()
+                            error_msg = error_data.get('data', {}).get('error', error_msg)
+                        except json.JSONDecodeError:
+                            pass
+                        raise ImgurUploadError(f"Bad request: {error_msg}")
+                        
+                    elif response.status_code == 403:
+                        raise ImgurConfigurationError("Invalid Imgur client ID or quota exceeded")
+                        
                     else:
-                        print(f"❌ Imgur 上傳失敗 (狀態碼: {response.status_code}): {response.text}")
+                        raise ImgurUploadError(f"Upload failed with status {response.status_code}: {response.text[:200]}")
                         
                 except requests.exceptions.SSLError as e:
-                    print(f"⚠️ SSL 錯誤: {str(e)}")
+                    self.logger.warning(f"SSL error on attempt {attempt + 1}: {e}")
                     if attempt < self.max_retries - 1:
-                        wait_time = (attempt + 1) * self.retry_delay
-                        print(f"⚠️ 等待 {wait_time} 秒後重試...")
-                        time.sleep(wait_time)
+                        time.sleep((attempt + 1) * self.retry_delay)
                         continue
+                    raise ImgurUploadError(f"SSL error after all retries: {e}")
+                    
                 except requests.exceptions.RequestException as e:
+                    self.logger.warning(f"Request error on attempt {attempt + 1}: {e}")
                     if attempt < self.max_retries - 1:
-                        wait_time = (attempt + 1) * self.retry_delay
-                        print(f"⚠️ 上傳失敗，等待 {wait_time} 秒後重試: {str(e)}")
-                        time.sleep(wait_time)
+                        time.sleep((attempt + 1) * self.retry_delay)
                         continue
-                    else:
-                        print(f"❌ Imgur 上傳失敗: {str(e)}")
-                        return None
-                        
-            return None
-                
+                    raise ImgurUploadError(f"Request failed after all retries: {e}")
+                    
+            raise ImgurUploadError("Upload failed after all retry attempts")
+            
+        except ImgurUploaderError:
+            raise
         except Exception as e:
-            print(f"❌ Imgur 上傳過程發生錯誤: {str(e)}")
-            return None
+            self.logger.error(f"Unexpected error during upload: {e}")
+            raise ImgurUploadError(f"Unexpected upload error: {e}")
 
-    def upload_image(self, image_path):
-        """
-        將圖片上傳到 Imgur，返回直接訪問連結
+    def upload_image(self, image_path: str) -> Optional[str]:
+        """Upload image to Imgur and return direct access URL
         
         Args:
-            image_path (str): 要上傳的圖片路徑
+            image_path: Path to the image file to upload
             
         Returns:
-            str: 上傳後圖片的直接連結
+            Image URL if successful, None if failed
+            
+        Raises:
+            ImgurConfigurationError: If client ID is missing or invalid
+            ImgurUploadError: If upload fails due to network or API issues
         """
-        return self.upload_to_imgur(image_path)
+        try:
+            validated_path = self._validate_image_path(image_path)
+            return self._upload_to_imgur(validated_path)
+        except ImgurUploaderError as e:
+            self.logger.error(f"Imgur upload failed: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error in upload_image: {e}")
+            return None
 
     @staticmethod
-    def verify_image_url(url):
-        """
-        驗證圖片 URL 是否有效
+    def verify_image_url(url: str, timeout: int = 5) -> bool:
+        """Verify if image URL is accessible and valid
         
         Args:
-            url (str): 圖片 URL
+            url: Image URL to verify
+            timeout: Request timeout in seconds
             
         Returns:
-            bool: URL 是否有效
+            True if URL is valid and accessible, False otherwise
         """
-        max_retries = 3
-        retry_delay = 2  # 秒
+        logger = logging.getLogger(__name__)
         
-        if not url.startswith('https://i.imgur.com/'):
-            print(f"⚠️ 非 Imgur 圖片 URL: {url}")
+        if not url or not isinstance(url, str):
+            logger.warning("Invalid URL provided for verification")
             return False
             
+        if not url.startswith('https://i.imgur.com/'):
+            logger.warning(f"Non-Imgur URL: {url}")
+            return False
+            
+        max_retries = 3
+        retry_delay = 2
+        
         for attempt in range(max_retries):
             try:
-                response = requests.head(url, timeout=5)
+                response = requests.head(url, timeout=timeout)
                 
                 if response.status_code == 200:
                     content_type = response.headers.get('Content-Type', '')
                     if content_type.startswith('image/'):
                         return True
                     else:
-                        print(f"⚠️ URL 不是圖片格式: {content_type}")
+                        logger.warning(f"URL is not an image: {content_type}")
                         return False
-                elif response.status_code == 429:  # 速率限制
+                        
+                elif response.status_code == 429:  # Rate limiting
                     if attempt < max_retries - 1:
-                        print(f"⚠️ 達到速率限制，等待 {retry_delay} 秒後重試 ({attempt + 1}/{max_retries})...")
+                        logger.warning(f"Rate limited, retrying in {retry_delay}s ({attempt + 1}/{max_retries})")
                         time.sleep(retry_delay)
                         continue
                     else:
-                        print("⚠️ 達到速率限制，跳過圖片驗證")
-                        return True
+                        logger.warning("Rate limited, skipping verification")
+                        return True  # Assume valid if we can't verify due to rate limits
+                        
                 else:
-                    print(f"⚠️ URL 返回錯誤狀態碼: {response.status_code}")
+                    logger.warning(f"URL returned error status: {response.status_code}")
                     return False
                     
-            except Exception as e:
+            except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
-                    print(f"⚠️ 驗證圖片 URL 時出錯，正在重試 ({attempt + 1}/{max_retries}): {str(e)}")
+                    logger.warning(f"Verification error, retrying ({attempt + 1}/{max_retries}): {e}")
                     time.sleep(retry_delay)
                     continue
                 else:
-                    print(f"⚠️ 驗證圖片 URL 時出錯: {str(e)}")
+                    logger.error(f"URL verification failed: {e}")
                     return False
                     
         return False 

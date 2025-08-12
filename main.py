@@ -121,32 +121,160 @@ async def process_image(image_path):
     except Exception as e:
         print(f"❌ 處理圖片時發生錯誤: {str(e)}")
 
+def get_image_files(directory_path: str) -> List[str]:
+    """Get all supported image files from directory"""
+    path = Path(directory_path)
+    if not path.is_dir():
+        raise ImageProcessingError(f"Directory not found: {directory_path}")
+        
+    extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp']
+    image_files = []
+    
+    for ext in extensions:
+        image_files.extend(glob.glob(str(path / ext)))
+        image_files.extend(glob.glob(str(path / ext.upper())))
+    
+    return sorted(image_files)
+
+async def process_batch(image_paths: List[str]) -> int:
+    """Process multiple images and return success count"""
+    success_count = 0
+    total_images = len(image_paths)
+    
+    logger.info(f"Processing batch of {total_images} images")
+    
+    for i, image_path in enumerate(image_paths, 1):
+        try:
+            logger.info(f"Processing image {i}/{total_images}: {Path(image_path).name}")
+            
+            success = await process_image(image_path)
+            if success:
+                success_count += 1
+                logger.info(f"✅ Successfully processed image {i}/{total_images}")
+            else:
+                logger.warning(f"⚠️ No vocabulary extracted from image {i}/{total_images}")
+                
+        except ImageProcessingError as e:
+            logger.error(f"❌ Image processing failed for {Path(image_path).name}: {e}")
+            continue
+        except UploadError as e:
+            logger.error(f"❌ Upload failed for {Path(image_path).name}: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"❌ Unexpected error for {Path(image_path).name}: {e}")
+            continue
+    
+    logger.info(f"Batch processing completed: {success_count}/{total_images} images processed successfully")
+    return success_count
+
 async def main():
+    """Main application entry point with comprehensive error handling"""
     try:
-        # 創建命令行參數解析器
-        parser = argparse.ArgumentParser(description='處理圖片並上傳到 Notion')
-        parser.add_argument('--path', type=str, help='圖片路徑或目錄路徑')
+        # Parse command line arguments
+        parser = argparse.ArgumentParser(
+            description='Process images and upload vocabulary to Notion',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Examples:
+  python main.py --path image.jpg          # Process single image
+  python main.py --path /path/to/images/   # Process directory
+  python main.py /path/to/image.png        # Process single image (positional)
+            """
+        )
+        parser.add_argument(
+            'path', 
+            nargs='?', 
+            help='Image file path or directory path'
+        )
+        parser.add_argument(
+            '--path', 
+            type=str, 
+            help='Image file path or directory path (alternative syntax)'
+        )
+        parser.add_argument(
+            '--verbose', '-v',
+            action='store_true',
+            help='Enable verbose logging'
+        )
+        
         args = parser.parse_args()
         
-        # 處理圖片
-        if args.path:
-            if os.path.isfile(args.path):
-                # 處理單個圖片
-                await process_image(args.path)
-            elif os.path.isdir(args.path):
-                # 處理目錄中的所有圖片
-                image_files = glob.glob(os.path.join(args.path, '*.jpg')) + \
-                            glob.glob(os.path.join(args.path, '*.png'))
-                for image_path in image_files:
-                    await process_image(image_path)
-            else:
-                print(f"❌ 無效的路徑: {args.path}")
+        # Set logging level
+        if args.verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+        
+        # Get path from arguments
+        target_path = args.path or getattr(args, 'path', None)
+        
+        if not target_path:
+            parser.print_help()
+            logger.error("No path provided. Please specify an image file or directory.")
+            sys.exit(1)
+        
+        target_path = Path(target_path)
+        
+        # Validate environment configuration
+        required_env_vars = ['NOTION_API_KEY', 'NOTION_DATABASE_ID']
+        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+            logger.error("Please check your .env file or environment configuration")
+            sys.exit(1)
+        
+        # Process images
+        if target_path.is_file():
+            # Process single image
+            logger.info(f"Processing single image: {target_path}")
+            try:
+                success = await process_image(str(target_path))
+                if success:
+                    logger.info("✅ Image processing completed successfully")
+                else:
+                    logger.warning("⚠️ No vocabulary extracted from image")
+                    sys.exit(1)
+            except (ImageProcessingError, UploadError) as e:
+                logger.error(f"❌ Processing failed: {e}")
+                sys.exit(1)
+                
+        elif target_path.is_dir():
+            # Process directory
+            logger.info(f"Processing directory: {target_path}")
+            try:
+                image_files = get_image_files(str(target_path))
+                if not image_files:
+                    logger.warning(f"No supported image files found in: {target_path}")
+                    sys.exit(1)
+                    
+                success_count = await process_batch(image_files)
+                if success_count == 0:
+                    logger.error("❌ No images were processed successfully")
+                    sys.exit(1)
+                else:
+                    logger.info(f"✅ Batch processing completed: {success_count}/{len(image_files)} images successful")
+                    
+            except ImageProcessingError as e:
+                logger.error(f"❌ Directory processing failed: {e}")
+                sys.exit(1)
         else:
-            print("❌ 請提供圖片路徑或目錄路徑")
+            logger.error(f"❌ Invalid path: {target_path} (not a file or directory)")
+            sys.exit(1)
             
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted by user")
+        sys.exit(130)
     except Exception as e:
-        logger.error(f"處理過程發生錯誤: {str(e)}")
-        raise
+        logger.error(f"❌ Unexpected application error: {e}")
+        if hasattr(args, 'verbose') and args.verbose:
+            logger.exception("Full traceback:")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Application interrupted")
+        sys.exit(130)
+    except Exception as e:
+        logger.error(f"Application startup failed: {e}")
+        sys.exit(1) 

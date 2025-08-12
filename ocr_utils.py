@@ -1,120 +1,250 @@
 import os
-import sys
-import pytesseract
-from PIL import Image
-from typing import Optional
 import logging
+from pathlib import Path
+from typing import Optional, List
 
-# 設定日誌
-logging.basicConfig(level=logging.INFO)
+# Optional imports for OCR functionality
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    PYTESSERACT_AVAILABLE = False
+    
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    Image = None
+    PIL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
+class OCRError(Exception):
+    """Base exception for OCR operations"""
+    pass
+
+class TesseractNotFoundError(OCRError):
+    """Tesseract executable not found"""
+    pass
+
+class ImageProcessingError(OCRError):
+    """Image processing related errors"""
+    pass
+
 def find_tesseract_path() -> Optional[str]:
-    """
-    自動尋找 Tesseract 安裝路徑
+    """Automatically find Tesseract installation path
     
     Returns:
-        Optional[str]: Tesseract 執行檔路徑，如果找不到則返回 None
+        Tesseract executable path if found, None otherwise
     """
-    # 常見的 Windows 安裝路徑
-    possible_paths = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        r'C:\Tesseract-OCR\tesseract.exe'
-    ]
+    # Check environment variable first
+    env_path = os.getenv('TESSERACT_PATH')
+    if env_path:
+        path_obj = Path(env_path)
+        if path_obj.exists() and path_obj.is_file():
+            return str(path_obj)
+        else:
+            logger.warning(f"TESSERACT_PATH points to non-existent file: {env_path}")
     
-    # 檢查環境變數
-    if 'TESSERACT_PATH' in os.environ:
-        tesseract_path = os.environ['TESSERACT_PATH']
-        if os.path.exists(tesseract_path):
-            return tesseract_path
+    # Common installation paths by platform
+    if os.name == 'nt':  # Windows
+        possible_paths = [
+            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+            r'C:\Tesseract-OCR\tesseract.exe'
+        ]
+    else:  # Unix-like systems
+        possible_paths = [
+            '/usr/bin/tesseract',
+            '/usr/local/bin/tesseract',
+            '/opt/homebrew/bin/tesseract',  # macOS with Homebrew
+            '/data/data/com.termux/files/usr/bin/tesseract'  # Termux
+        ]
     
-    # 檢查可能的安裝路徑
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
+    for path_str in possible_paths:
+        path_obj = Path(path_str)
+        if path_obj.exists() and path_obj.is_file():
+            return str(path_obj)
             
     return None
 
-def setup_tesseract() -> bool:
-    """
-    設定 Tesseract 路徑
+def setup_tesseract() -> None:
+    """Setup Tesseract path and validate installation
     
-    Returns:
-        bool: 設定是否成功
+    Raises:
+        TesseractNotFoundError: If Tesseract cannot be found or configured
     """
+    if not PYTESSERACT_AVAILABLE:
+        raise TesseractNotFoundError("pytesseract is not installed")
+        
     try:
         tesseract_path = find_tesseract_path()
-        if tesseract_path:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_path
-            logger.info(f"已找到 Tesseract 路徑: {tesseract_path}")
-            return True
-        else:
-            logger.error("找不到 Tesseract 安裝路徑，請確保已安裝 Tesseract-OCR")
-            return False
+        if not tesseract_path:
+            raise TesseractNotFoundError(
+                "Tesseract-OCR not found. Please install Tesseract or set TESSERACT_PATH environment variable"
+            )
+            
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        
+        # Validate Tesseract installation
+        try:
+            version = pytesseract.get_tesseract_version()
+            logger.info(f"Tesseract found at {tesseract_path}, version: {version}")
+        except Exception as e:
+            raise TesseractNotFoundError(f"Tesseract installation invalid: {e}")
+            
+    except TesseractNotFoundError:
+        raise
     except Exception as e:
-        logger.error(f"設定 Tesseract 路徑時發生錯誤: {str(e)}")
-        return False
+        logger.error(f"Error setting up Tesseract: {e}")
+        raise TesseractNotFoundError(f"Tesseract setup failed: {e}")
 
-def extract_text(image_path: str, lang: str = "eng") -> Optional[str]:
-    """
-    從圖片中提取文字
+def _validate_image_file(image_path: str) -> Path:
+    """Validate image file path and format
     
     Args:
-        image_path (str): 圖片檔案路徑
-        lang (str): OCR 語言，預設為英文
+        image_path: Path to image file
         
     Returns:
-        Optional[str]: 提取的文字內容，如果發生錯誤則返回 None
+        Validated Path object
+        
+    Raises:
+        ImageProcessingError: If image is invalid or inaccessible
     """
+    path = Path(image_path)
+    
+    if not path.exists():
+        raise ImageProcessingError(f"Image file not found: {image_path}")
+        
+    if not path.is_file():
+        raise ImageProcessingError(f"Path is not a file: {image_path}")
+    
+    # Security check: resolve path to prevent directory traversal
     try:
-        # 檢查檔案是否存在
-        if not os.path.exists(image_path):
-            logger.error(f"找不到圖片檔案: {image_path}")
-            return None
-            
-        # 檢查檔案是否為圖片
+        resolved_path = path.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        raise ImageProcessingError(f"Invalid file path: {e}")
+    
+    # Validate image format if PIL is available
+    if PIL_AVAILABLE:
         try:
-            image = Image.open(image_path)
-            image.verify()  # 驗證圖片完整性
+            with Image.open(resolved_path) as img:
+                img.verify()
         except Exception as e:
-            logger.error(f"圖片檔案無效: {str(e)}")
-            return None
-            
-        # 重新開啟圖片（因為 verify 會關閉檔案）
-        image = Image.open(image_path)
+            raise ImageProcessingError(f"Invalid image file: {e}")
+    else:
+        # Basic file extension check if PIL not available
+        allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+        if resolved_path.suffix.lower() not in allowed_extensions:
+            raise ImageProcessingError(f"Unsupported image format: {resolved_path.suffix}")
         
-        # 確保 Tesseract 已設定
-        if not setup_tesseract():
-            return None
-            
-        # 執行 OCR
-        text = pytesseract.image_to_string(image, lang=lang)
+    return resolved_path
+
+def extract_text(image_path: str, lang: str = "eng", config: str = "") -> str:
+    """Extract text from image using OCR
+    
+    Args:
+        image_path: Path to image file
+        lang: OCR language (default: "eng")
+        config: Additional Tesseract configuration
         
-        # 清理文字
+    Returns:
+        Extracted text content
+        
+    Raises:
+        TesseractNotFoundError: If Tesseract is not available
+        ImageProcessingError: If image processing fails
+        OCRError: If OCR operation fails
+    """
+    if not PIL_AVAILABLE:
+        raise ImageProcessingError("PIL (Pillow) is required for image processing but not installed")
+        
+    try:
+        # Validate inputs
+        if not image_path or not isinstance(image_path, str):
+            raise ImageProcessingError("Invalid image path provided")
+            
+        if not lang or not isinstance(lang, str):
+            raise OCRError("Invalid language parameter")
+        
+        # Setup Tesseract
+        setup_tesseract()
+        
+        # Validate image file
+        validated_path = _validate_image_file(image_path)
+        
+        # Extract text
+        with Image.open(validated_path) as image:
+            # Apply basic image preprocessing if needed
+            if image.mode not in ('RGB', 'L'):
+                image = image.convert('RGB')
+                
+            text = pytesseract.image_to_string(
+                image, 
+                lang=lang, 
+                config=config or '--psm 6'
+            )
+        
+        # Clean and validate extracted text
         text = text.strip()
         
         if not text:
-            logger.warning("OCR 未能提取到任何文字")
-            return None
+            logger.warning(f"No text extracted from image: {image_path}")
+            return ""
             
+        logger.info(f"Successfully extracted {len(text)} characters from {image_path}")
         return text
         
+    except (TesseractNotFoundError, ImageProcessingError):
+        raise
     except Exception as e:
-        logger.error(f"OCR 處理時發生錯誤: {str(e)}")
-        return None
+        logger.error(f"OCR processing failed: {e}")
+        raise OCRError(f"OCR processing failed: {e}")
 
-def get_available_languages() -> list:
-    """
-    獲取可用的 OCR 語言列表
+def get_available_languages() -> List[str]:
+    """Get list of available OCR languages
     
     Returns:
-        list: 可用的語言代碼列表
+        List of available language codes
+        
+    Raises:
+        TesseractNotFoundError: If Tesseract is not available
+        OCRError: If language detection fails
+    """
+    if not PYTESSERACT_AVAILABLE:
+        raise TesseractNotFoundError("pytesseract is not installed")
+        
+    try:
+        setup_tesseract()
+        languages = pytesseract.get_languages()
+        logger.info(f"Available languages: {languages}")
+        return languages
+    except TesseractNotFoundError:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get available languages: {e}")
+        raise OCRError(f"Language detection failed: {e}")
+
+def validate_ocr_config() -> bool:
+    """Validate OCR configuration and dependencies
+    
+    Returns:
+        True if OCR is properly configured
+        
+    Raises:
+        TesseractNotFoundError: If Tesseract is not available
     """
     try:
-        if not setup_tesseract():
-            return []
-        return pytesseract.get_languages()
+        setup_tesseract()
+        languages = get_available_languages()
+        
+        if 'eng' not in languages:
+            logger.warning("English language pack not available")
+            
+        logger.info("OCR configuration validated successfully")
+        return True
+        
     except Exception as e:
-        logger.error(f"獲取可用語言時發生錯誤: {str(e)}")
-        return [] 
+        logger.error(f"OCR configuration validation failed: {e}")
+        raise 
