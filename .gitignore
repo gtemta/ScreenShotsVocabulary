@@ -1,6 +1,8 @@
 # 環境變量和敏感信息
 .env
 imgur_credentials.json
+imgbb_credentials.json
+*_credentials.json
 token.json
 credentials.json
 processed_words.json

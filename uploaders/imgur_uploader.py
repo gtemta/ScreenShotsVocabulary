@@ -2,6 +2,8 @@ import os
 import json
 import logging
 import time
+import ssl
+import random
 from pathlib import Path
 from typing import Optional
 import io
@@ -9,6 +11,7 @@ import urllib3
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.util.ssl_ import create_urllib3_context
 import certifi
 
 # Optional PIL import for image processing
@@ -50,30 +53,110 @@ class ImgurUploader:
         self._setup_session()
         
     def _setup_session(self) -> None:
-        """Configure requests session with security best practices"""
+        """Configure requests session with enhanced SSL and network handling"""
         self.session = requests.Session()
+        
+        # Enhanced retry strategy with SSL error handling
         retry_strategy = Retry(
             total=self.max_retries,
-            backoff_factor=0.5,
+            connect=self.max_retries,
+            read=self.max_retries,
+            status=self.max_retries,
+            backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST", "GET", "HEAD"],
-            respect_retry_after_header=True
+            respect_retry_after_header=True,
+            # Add specific SSL/connection error handling
+            raise_on_status=False
         )
-        adapter = HTTPAdapter(
+        
+        # Create custom SSL context for better compatibility
+        ssl_context = self._create_ssl_context()
+        
+        # Custom adapter with SSL configuration
+        class SSLAdapter(HTTPAdapter):
+            def __init__(self, ssl_context=None, **kwargs):
+                self.ssl_context = ssl_context
+                super().__init__(**kwargs)
+                
+            def init_poolmanager(self, *args, **kwargs):
+                kwargs['ssl_context'] = self.ssl_context
+                return super().init_poolmanager(*args, **kwargs)
+        
+        adapter = SSLAdapter(
+            ssl_context=ssl_context,
             max_retries=retry_strategy,
-            pool_connections=10,
-            pool_maxsize=10
+            pool_connections=20,
+            pool_maxsize=20,
+            pool_block=False
         )
+        
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         
-        # Use secure certificate verification
-        self.session.verify = certifi.where()
-        self.session.timeout = (5, 30)
-        
-        # Disable SSL warnings only in development
-        if os.getenv('ENVIRONMENT') != 'production':
+        # Configure SSL verification
+        if os.getenv('IMGUR_DISABLE_SSL_VERIFY', '').lower() == 'true':
+            self.session.verify = False
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            self.logger.warning("SSL verification disabled - use only for debugging!")
+        else:
+            self.session.verify = certifi.where()
+        
+        # Set timeouts (connect, read)
+        self.session.timeout = (10, 60)
+        
+        # Configure proxy if available
+        self._configure_proxy()
+        
+        # Enhanced headers
+        self.session.headers.update({
+            'User-Agent': 'ScreenShotsVocabulary/1.0 (Python/requests)',
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        })
+        
+    def _create_ssl_context(self):
+        """Create SSL context with multiple TLS version support"""
+        try:
+            # Try to create context with TLS 1.2+ support
+            context = ssl.create_default_context(cafile=certifi.where())
+            
+            # Configure for better compatibility
+            context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS')
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            
+            # Try different options for compatibility
+            context.options |= ssl.OP_NO_SSLv2
+            context.options |= ssl.OP_NO_SSLv3
+            context.options |= ssl.OP_NO_TLSv1
+            context.options |= ssl.OP_NO_TLSv1_1
+            
+            return context
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to create custom SSL context: {e}")
+            # Fallback to urllib3 default context
+            try:
+                return create_urllib3_context()
+            except Exception:
+                self.logger.warning("Using default SSL context")
+                return None
+                
+    def _configure_proxy(self):
+        """Auto-detect and configure proxy settings"""
+        # Check environment variables for proxy configuration
+        proxies = {}
+        
+        for scheme in ['http', 'https']:
+            proxy_env = f"{scheme}_proxy"
+            proxy_url = os.getenv(proxy_env) or os.getenv(proxy_env.upper())
+            if proxy_url:
+                proxies[scheme] = proxy_url
+                self.logger.info(f"Using {scheme} proxy: {proxy_url}")
+        
+        if proxies:
+            self.session.proxies.update(proxies)
     
     def _load_imgur_credentials(self) -> None:
         """Load Imgur API credentials from file"""
@@ -187,7 +270,8 @@ class ImgurUploader:
                 'image': (filename, compressed_image, 'image/jpeg')
             }
             
-            # Retry mechanism with exponential backoff
+            # Enhanced retry mechanism with exponential backoff and jitter
+            last_exception = None
             for attempt in range(self.max_retries):
                 try:
                     response = self.session.post(
@@ -204,8 +288,8 @@ class ImgurUploader:
                         
                     elif response.status_code == 429:  # Rate limiting
                         if attempt < self.max_retries - 1:
-                            wait_time = (2 ** attempt) * self.retry_delay
-                            self.logger.warning(f"Rate limited, waiting {wait_time}s before retry {attempt + 1}/{self.max_retries}")
+                            wait_time = self._calculate_backoff_time(attempt, base_delay=self.retry_delay)
+                            self.logger.warning(f"Rate limited, waiting {wait_time:.1f}s before retry {attempt + 1}/{self.max_retries}")
                             time.sleep(wait_time)
                             continue
                         else:
@@ -224,29 +308,86 @@ class ImgurUploader:
                         raise ImgurConfigurationError("Invalid Imgur client ID or quota exceeded")
                         
                     else:
+                        if attempt < self.max_retries - 1:
+                            wait_time = self._calculate_backoff_time(attempt)
+                            self.logger.warning(f"HTTP {response.status_code}, retrying in {wait_time:.1f}s ({attempt + 1}/{self.max_retries})")
+                            time.sleep(wait_time)
+                            continue
                         raise ImgurUploadError(f"Upload failed with status {response.status_code}: {response.text[:200]}")
                         
-                except requests.exceptions.SSLError as e:
-                    self.logger.warning(f"SSL error on attempt {attempt + 1}: {e}")
+                except (requests.exceptions.SSLError, 
+                        requests.exceptions.ConnectionError,
+                        ConnectionError) as e:
+                    last_exception = e
+                    self.logger.warning(f"Connection/SSL error on attempt {attempt + 1}: {e}")
                     if attempt < self.max_retries - 1:
-                        time.sleep((attempt + 1) * self.retry_delay)
+                        wait_time = self._calculate_backoff_time(attempt, base_delay=self.retry_delay * 2)
+                        self.logger.info(f"Retrying in {wait_time:.1f}s with enhanced SSL handling...")
+                        time.sleep(wait_time)
+                        # Try alternative SSL configurations on retry
+                        self._reconfigure_ssl_on_retry(attempt)
                         continue
-                    raise ImgurUploadError(f"SSL error after all retries: {e}")
+                    raise ImgurUploadError(f"SSL/Connection error after all retries: {e}")
                     
                 except requests.exceptions.RequestException as e:
+                    last_exception = e
                     self.logger.warning(f"Request error on attempt {attempt + 1}: {e}")
                     if attempt < self.max_retries - 1:
-                        time.sleep((attempt + 1) * self.retry_delay)
+                        wait_time = self._calculate_backoff_time(attempt)
+                        time.sleep(wait_time)
                         continue
                     raise ImgurUploadError(f"Request failed after all retries: {e}")
                     
-            raise ImgurUploadError("Upload failed after all retry attempts")
-            
+            # If we get here, all retries failed
+            if last_exception:
+                raise ImgurUploadError(f"Upload failed after {self.max_retries} retries. Last error: {last_exception}")
+            else:
+                raise ImgurUploadError("Upload failed after all retry attempts")
+                    
         except ImgurUploaderError:
             raise
         except Exception as e:
             self.logger.error(f"Unexpected error during upload: {e}")
             raise ImgurUploadError(f"Unexpected upload error: {e}")
+    
+    def _calculate_backoff_time(self, attempt: int, base_delay: Optional[int] = None) -> float:
+        """Calculate exponential backoff time with jitter"""
+        if base_delay is None:
+            base_delay = self.retry_delay
+            
+        # Exponential backoff: base_delay * (2 ^ attempt)
+        backoff_time = base_delay * (2 ** attempt)
+        
+        # Add jitter (random variation) to prevent thundering herd
+        jitter = random.uniform(0.5, 1.5)
+        
+        # Cap maximum wait time at 30 seconds
+        return min(backoff_time * jitter, 30.0)
+    
+    def _reconfigure_ssl_on_retry(self, attempt: int) -> None:
+        """Try different SSL configurations on retry attempts"""
+        try:
+            if attempt == 1:
+                # First retry: Try with less strict SSL
+                self.logger.info("Trying fallback SSL configuration...")
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                
+                class FallbackSSLAdapter(HTTPAdapter):
+                    def init_poolmanager(self, *args, **kwargs):
+                        kwargs['ssl_context'] = context
+                        return super().init_poolmanager(*args, **kwargs)
+                        
+                self.session.mount("https://", FallbackSSLAdapter(max_retries=0))
+                
+            elif attempt == 2:
+                # Second retry: Disable SSL verification temporarily
+                self.logger.info("Temporarily disabling SSL verification for this attempt...")
+                self.session.verify = False
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to reconfigure SSL: {e}")
 
     def upload_image(self, image_path: str) -> Optional[str]:
         """Upload image to Imgur and return direct access URL

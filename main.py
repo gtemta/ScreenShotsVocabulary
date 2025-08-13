@@ -1,9 +1,12 @@
 import asyncio
 import logging
+import sys
+from pathlib import Path
+from typing import List
 from processors.word_processor import WordProcessor, is_valid_english_sentence
-from uploaders.imgur_uploader import ImgurUploader
-from uploaders.notion_uploader import NotionUploader
-from ocr_utils import extract_text
+from uploaders.image_upload_manager import ImageUploadManager, ImageUploadError
+from uploaders.notion_uploader import NotionUploader, UploadError
+from ocr_utils import extract_text, ImageProcessingError
 import os
 from dotenv import load_dotenv
 import argparse
@@ -65,14 +68,24 @@ async def process_image(image_path):
             print("❌ 無法從圖片中提取有效的關鍵字，跳過此圖片")
             return
             
-        # 4. 上傳圖片到 Imgur（只上傳一次）
-        imgur = ImgurUploader()
-        image_url = imgur.upload_image(image_path)
-        if not image_url:
-            print("❌ 圖片上傳到 Imgur 失敗")
-            return
+        # 4. 上傳圖片到雲端（多個服務商自動備援）
+        try:
+            upload_manager = ImageUploadManager()
+            print(f"\n嘗試上傳圖片到雲端（可用服務商: {len(upload_manager.providers)} 個）...")
             
-        print(f"\n圖片已上傳到 Imgur: {image_url}")
+            image_url = upload_manager.upload_image(image_path)
+            if not image_url:
+                print("❌ 圖片上傳失敗：所有服務商都無法使用")
+                return
+                
+            print(f"✅ 圖片已成功上傳: {image_url}")
+            
+        except ImageUploadError as e:
+            print(f"❌ 圖片上傳失敗: {e}")
+            return
+        except Exception as e:
+            print(f"❌ 圖片上傳時發生未預期錯誤: {e}")
+            return
         
         # 5. 為每個詞彙創建 Notion 頁面
         notion = NotionUploader()
@@ -182,7 +195,7 @@ Examples:
             """
         )
         parser.add_argument(
-            'path', 
+            'positional_path', 
             nargs='?', 
             help='Image file path or directory path'
         )
@@ -203,8 +216,8 @@ Examples:
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        # Get path from arguments
-        target_path = args.path or getattr(args, 'path', None)
+        # Get path from arguments (positional or named)
+        target_path = args.path or args.positional_path
         
         if not target_path:
             parser.print_help()
