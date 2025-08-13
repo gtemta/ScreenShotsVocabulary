@@ -37,3 +37,4 @@ temp_image.jpg
 temp_* 
 __pycache__/notion_utils.cpython-311.pyc
 
+/.claude
