@@ -10,7 +10,11 @@ def build_prompt(text: str) -> str:
     """
     return f"""You are an expert English language instructor helping intermediate to advanced learners.
 
-Please extract at most 3 useful English words or phrases from the following text. For each word/phrase, provide:
+Please extract the MOST IMPORTANT AND CHALLENGING English word or phrase from the following text for focused vocabulary learning.
+
+Prioritize: unknown/rare words > complex phrases > advanced vocabulary > common words
+
+For the selected word/phrase, provide:
 1. The word/phrase itself
 2. Chinese translation
 3. English definition
@@ -18,6 +22,8 @@ Please extract at most 3 useful English words or phrases from the following text
 5. Example sentences (at least 2)
 6. Synonyms (if any)
 7. Antonyms (if any)
+
+IMPORTANT: Return ONLY ONE vocabulary item - the most valuable for learning. This enables focused, efficient vocabulary acquisition.
 
 Only return the results in the following JSON format:
 {{

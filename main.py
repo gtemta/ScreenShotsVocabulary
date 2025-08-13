@@ -87,49 +87,48 @@ async def process_image(image_path):
             print(f"❌ 圖片上傳時發生未預期錯誤: {e}")
             return
         
-        # 5. 為每個詞彙創建 Notion 頁面
+        # 5. 上傳最重要的單字到 Notion（單一單字模式）
         notion = NotionUploader()
-        success_count = 0
         total_words = len(final_result["vocabulary"])
-        new_words = []  # 用於收集成功上傳的新單字
         
-        print(f"\n開始上傳 {total_words} 個詞彙到 Notion...")
+        if total_words == 0:
+            print("❌ 沒有找到需要學習的詞彙")
+            return
         
-        for i, (vocab, chinese_word, definition, chinese_def, examples, synonyms, antonyms) in enumerate(
-            zip(
-                final_result["vocabulary"],
-                final_result["chinese_words"],
-                final_result["definitions"],
-                final_result["chinese_definitions"],
-                final_result["examples"],
-                final_result["synonyms"],
-                final_result["antonyms"]
-            ),
-            1
-        ):
-            try:
-                # 上傳到 Notion
-                await notion.upload(
-                    word=vocab,
-                    image_url=image_url,
-                    chinese_word=chinese_word,
-                    definition=definition,
-                    chinese_definition=chinese_def,
-                    examples=examples,
-                    synonyms=synonyms,
-                    antonyms=antonyms
-                )
-                success_count += 1
-                new_words.append(vocab)  # 添加到新單字列表
-                print(f"✅ 成功上傳詞彙 {i}/{total_words}: {vocab}")
-            except Exception as e:
-                print(f"❌ 上傳詞彙 {vocab} 失敗: {str(e)}")
+        # 只處理第一個（最重要的）單字
+        vocab = final_result["vocabulary"][0]
+        chinese_word = final_result["chinese_words"][0]
+        definition = final_result["definitions"][0]
+        chinese_def = final_result["chinese_definitions"][0]
+        examples = final_result["examples"][0]
+        synonyms = final_result["synonyms"][0]
+        antonyms = final_result["antonyms"][0]
         
-        print(f"\n上傳完成：成功 {success_count}/{total_words} 個詞彙")
+        print(f"\n專注學習最重要的詞彙: {vocab}")
+        print(f"（AI 從 {total_words} 個候選詞彙中智能篩選）")
         
-        # 6. 保存新學習的單字
-        if new_words:
-            save_learned_words(new_words)
+        try:
+            # 上傳到 Notion
+            await notion.upload(
+                word=vocab,
+                image_url=image_url,
+                chinese_word=chinese_word,
+                definition=definition,
+                chinese_definition=chinese_def,
+                examples=examples,
+                synonyms=synonyms,
+                antonyms=antonyms
+            )
+            
+            print(f"✅ 成功上傳詞彙: {vocab}")
+            
+            # 6. 保存新學習的單字
+            save_learned_words([vocab])
+            print(f"✅ 已記錄學習進度，避免重複學習")
+            
+        except Exception as e:
+            print(f"❌ 上傳詞彙 {vocab} 失敗: {str(e)}")
+            return
             
     except Exception as e:
         print(f"❌ 處理圖片時發生錯誤: {str(e)}")
