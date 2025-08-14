@@ -103,9 +103,9 @@ class NotionUploader:
                     elif e.code == 'unauthorized':
                         raise NotionConfigurationError("Invalid API key or insufficient permissions")
                     elif e.code == 'validation_error':
-                        raise NotionUploadError(f"Data validation failed: {e.message}")
+                        raise NotionUploadError(f"Data validation failed: {str(e)}")
                     else:
-                        raise NotionUploadError(f"Notion API error: {e.message}")
+                        raise NotionUploadError(f"Notion API error: {str(e)}")
                         
             return False
             
@@ -242,4 +242,4 @@ class NotionUploader:
             elif e.code == 'object_not_found':
                 raise NotionConfigurationError(f"Database not found: {self.database_id}")
             else:
-                raise NotionConfigurationError(f"Database access failed: {e.message}") 
+                raise NotionConfigurationError(f"Database access failed: {str(e)}") 
