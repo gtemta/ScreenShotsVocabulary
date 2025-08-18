@@ -4,6 +4,7 @@ from typing import List, Optional
 from notion_client import Client
 from notion_client.helpers import get_id
 from notion_client.errors import RequestTimeoutError, APIResponseError
+from utils.notion_validator import NotionDatabaseValidator
 
 class UploadError(Exception):
     """Base exception for upload operations"""
@@ -25,6 +26,7 @@ class NotionUploader:
         self.database_id = os.getenv('NOTION_DATABASE_ID')
         self.client = Client(auth=self.api_key)
         self.logger = logging.getLogger(__name__)
+        self.validator = NotionDatabaseValidator(self.database_id, self.api_key)
     
     async def upload(
         self,
@@ -116,7 +118,7 @@ class NotionUploader:
             raise NotionUploadError(f"Unexpected upload error: {e}")
     
     def test_connection(self) -> bool:
-        """Test Notion connection and database access
+        """Test Notion connection and database access with structure validation
         
         Returns:
             True if connection is successful
@@ -125,8 +127,38 @@ class NotionUploader:
             NotionConfigurationError: If connection fails
         """
         try:
+            # 基本連接測試
             self._validate_database_access()
+            
+            # 資料庫結構驗證
+            is_valid, report = self.validator.validate_database_structure()
+            
+            if not is_valid:
+                self.logger.warning("Database structure validation failed")
+                if "error" in report:
+                    raise NotionConfigurationError(f"Structure validation error: {report['error']}")
+                
+                # 輸出結構問題警告
+                if report.get("missing_required"):
+                    self.logger.error(f"Missing required properties: {report['missing_required']}")
+                    raise NotionConfigurationError(f"Missing required database properties: {report['missing_required']}")
+                
+                if report.get("type_mismatches"):
+                    self.logger.warning(f"Property type mismatches: {report['type_mismatches']}")
+            
+            # 輸出兼容性報告
+            score = report.get("compatibility_score", 0)
+            self.logger.info(f"Database compatibility score: {score}%")
+            
+            if report.get("recommendations"):
+                self.logger.info("Database improvement recommendations:")
+                for rec in report["recommendations"]:
+                    self.logger.info(f"  {rec}")
+            
             return True
+            
+        except NotionConfigurationError:
+            raise
         except Exception as e:
             self.logger.error(f"Notion connection test failed: {e}")
             raise NotionConfigurationError(f"Connection test failed: {e}")

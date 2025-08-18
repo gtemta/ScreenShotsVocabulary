@@ -2,6 +2,7 @@ import os
 import logging
 from pathlib import Path
 from typing import Optional, List
+from utils.text_cleaner import TextCleaner
 
 # Optional imports for OCR functionality
 try:
@@ -187,14 +188,28 @@ def extract_text(image_path: str, lang: str = "eng", config: str = "") -> str:
             )
         
         # Clean and validate extracted text
-        text = text.strip()
+        raw_text = text.strip()
         
-        if not text:
+        if not raw_text:
             logger.warning(f"No text extracted from image: {image_path}")
             return ""
+        
+        # 使用TextCleaner清理OCR輸出
+        logger.info(f"Raw OCR output length: {len(raw_text)} characters")
+        
+        cleaner = TextCleaner()
+        cleaned_text = cleaner.clean_ocr_text(raw_text)
+        
+        # 獲取清理統計
+        stats = cleaner.get_cleaning_stats(raw_text, cleaned_text)
+        logger.info(f"Text cleaning completed: {stats['cleaned_length']} chars ({stats['reduction_ratio']:.1%} reduction)")
+        logger.info(f"Found {stats['english_words_found']} English words in {stats['cleaned_lines']} clean lines")
+        
+        if not cleaned_text:
+            logger.warning(f"No valid text found after cleaning from image: {image_path}")
+            return ""
             
-        logger.info(f"Successfully extracted {len(text)} characters from {image_path}")
-        return text
+        return cleaned_text
         
     except (TesseractNotFoundError, ImageProcessingError):
         raise
